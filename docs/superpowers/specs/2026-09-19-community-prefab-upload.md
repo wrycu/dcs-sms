@@ -416,21 +416,32 @@ and no mod update. By the time uploads open, every entry already has an image.
 
 ## Implementation status (2026-09-26)
 
-A minimal end-to-end slice landed ahead of the phases above, **without either
-auth layer**:
+A working end-to-end slice with **Layer 2 (Ed25519 identity) but not Layer 1
+(shared-key HMAC)**:
 
 - **Worker** — `tools/ingest-worker/` (Cloudflare, plain JS). Wire format,
-  caps, `202/400/409/413/429` replies, sha256 dedup against `index.json` and
-  open submission PRs (matched on the hash line in the PR body), slug
-  + `-N` collision suffix, one-commit PR via the Git Data API, per-IP hourly
-  limit and the global draft breaker (Workers KV). No HMAC, no Ed25519, so no
-  ownership, handle binding, updates-as-revisions or re-upload flag yet.
-- **ME-mod** — `share_submit.lua` (caps, multipart, job), `share_dialog.lua`
-  (form + recent-screenshot checklist, no thumbnails, no Capture now, no
-  identity export/import), POST support in `community_transport.lua`. Gated
-  on `community_config.SUBMIT_URL`.
-- **Not started** — Phase 1 (schematic renderer, image optimiser, image checks
-  in `validate.yml`); Phase 2 crypto; the release-workflow key injection.
-
-Adding the auth layers later is additive: new `X-SMS-*` headers on the same
-POST, verified in the worker before the rate limit.
+  caps, sha256 dedup against `index.json` and open submission PRs (matched on
+  the hash line in the PR body), slug + `-N` suffix, one-commit PR via the Git
+  Data API, per-IP / per-key hourly + per-key daily limits, global draft
+  breaker, `BANNED_KEYS` → 403. Signature verification with native WebCrypto
+  Ed25519, ±300 s timestamp window, single-use nonces (KV, 600 s). TOFU key
+  registry and first-come handle binding in KV; a conflicting handle is
+  labelled `needs-review: handle-conflict`, not refused. Sidecar carries
+  `submitter_key`.
+- **ME-mod** — `sha512.lua` + `ed25519.lua` (pure arithmetic: the ME is **PUC
+  Lua 5.1 with no bit library**, not LuaJIT as written above; RFC 8032 vectors
+  + cross-checked against OpenSSL; ~0.1 s keygen+sign), `share_identity.lua`,
+  signing phase in `share_submit.lua`, fingerprint + "Show key file" in
+  `share_dialog.lua`.
+- **Deviations from the design above:**
+  - The signature covers the `meta` bytes directly, with no keyid and no
+    sha256(meta). Ed25519 already hashes its message with SHA-512, so the
+    Lua side needs no SHA-256.
+  - The fingerprint is `sms:` + 16 hex of SHA-512(pubkey), not
+    `SHA256:<b64>`.
+  - There is no CSPRNG in DCS Lua. The seed is SHA-512 over pooled
+    timers, jitter and addresses (documented in `share_identity.lua`). A native
+    RNG via the bundled OpenSSL is a possible later hardening step.
+- **Not yet:** entry ownership / updates-as-revisions, the re-upload flag,
+  identity export/import UI (the file can be copied by hand), Layer 1, Phase 1
+  (schematics, image optimiser, `validate.yml` image checks).

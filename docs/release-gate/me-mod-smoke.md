@@ -565,6 +565,10 @@ Needs `community_config.SUBMIT_URL` pointing at a deployed ingest worker (`tools
 - [ ] Fill every field, tick one screenshot, **Submit** → footer counts up "Uploading… N%" then "Submitted for review"; the map stays pannable throughout; **Open PR** appears and opens the PR in the browser.
 - [ ] The PR adds `prefabs/<slug>.prefab`, `<slug>.meta.json` and `images/<slug>/1.<ext>`, is labelled `community-submission`, and its `validate` check passes.
 - [ ] Reopen the dialog → Author is remembered.
+- [ ] First submission on a fresh install (no `Saved Games\DCS\dcs-sms\identity.json`): the dialog says a key is created on first submission; Submit shows "Creating your submitter key…" briefly without freezing the map; afterwards the dialog shows `Your submitter key: sms:…` and `identity.json` exists.
+- [ ] The PR body shows the same `sms:…` fingerprint and "first submission from this key"; the sidecar has `submitter_key`. A second submission says "1 earlier submission(s)".
+- [ ] **Show key file** opens Explorer with `identity.json` selected.
+- [ ] Set the PC clock 10+ minutes off and Submit → the footer says the clock is off; no PR. Restore the clock.
 - [ ] Submit the same prefab again while its PR is still open → "Already submitted and awaiting review: <PR link>"; no new PR. Close that PR, submit again → accepted.
 - [ ] Submit a prefab whose PR was merged → "Already in the catalog as ..."; no new PR.
 - [ ] Start an upload with several large screenshots and press **Stop** → "Upload stopped."; no PR is opened.

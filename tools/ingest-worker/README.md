@@ -18,10 +18,12 @@ Plain JavaScript, no dependencies, no build step.
 
 | Status | Body |
 |---|---|
-| `202` | `{submission_id, pr_url}` |
+| `202` | `{submission_id, pr_url, submitter_key}` |
 | `400` / `413` | `{error}` — bad or oversized submission |
+| `401` | `{error}` — unsigned, bad signature, clock off by more than 5 minutes, or a replayed request |
+| `403` | `{error}` — the submitter key is banned |
 | `409` | `{error, existing}` — identical prefab already in the catalog; `{error, existing, pr_url}` — identical prefab awaiting review in an open submission PR |
-| `429` | `{error}` + `Retry-After` — per-IP hourly limit |
+| `429` | `{error}` + `Retry-After` — per-IP hourly, or per-key hourly/daily limit |
 | `502` | `{error}` — GitHub call failed |
 
 `GET /v1/health` → `{ok: true}`.
@@ -31,10 +33,30 @@ A submission becomes one commit on `submission/<slug>-<id>` adding
 `images/<slug>/<n>.<ext>`, and a PR labelled `community-submission`. The
 catalog's `validate.yml` runs on the PR; a human merge is the gate.
 
-**No client authentication yet.** Protections are the size caps, the per-IP
-limit, a global hourly breaker (past it, PRs open as drafts) and the manual
-merge. Shared-key HMAC and Ed25519 identity from the spec are additive headers
-on the same POST.
+### Signing
+
+Every submission is signed with the submitter's per-install **Ed25519** key,
+which the mod creates on first use and keeps in
+`<Saved Games>\DCS\dcs-sms\identity.json`. Headers:
+
+| Header | Value |
+|---|---|
+| `X-SMS-PubKey` | base64 32-byte public key |
+| `X-SMS-Timestamp` | unix seconds; must be within 5 minutes of the worker's clock |
+| `X-SMS-Nonce` | 32 hex chars, single use (kept 10 minutes) |
+| `X-SMS-Signature` | base64 Ed25519 signature over `dcs-sms-submit/1\n<pubkey b64>\n<ts>\n<nonce>\n<meta part bytes>` |
+
+The key is **trusted on first use**: the first accepted submission registers
+it, and the PR body shows its fingerprint (`sms:` + 16 hex of SHA-512 of the
+key) and how many earlier submissions it has made. The fingerprint is also
+written to the sidecar as `submitter_key`. The first key to submit under an
+author name claims it. A later submission using that name from another key
+is **flagged**, not refused: label `needs-review: handle-conflict` plus a note in
+the PR. This proves "same submitter as before", never who they are.
+
+Other protections: size caps, per-IP and per-key limits, a global hourly
+breaker (past it, PRs open as drafts), and the manual merge. The spec's
+shared-key HMAC layer is not implemented.
 
 ## First-time setup
 
@@ -99,7 +121,10 @@ In `wrangler.toml`, `[vars]`:
 | `GITHUB_REPO` | `wrycu/dcs-sms-prefabs` | `owner/name` of the catalog PRs open against |
 | `BASE_BRANCH` | `main` | branch PRs target; also where `index.json` is read for dedup |
 | `LIMIT_PER_IP_HOUR` | `10` | submissions per IP per hour before `429` |
+| `LIMIT_PER_KEY_HOUR` | `5` | submissions per submitter key per hour |
+| `LIMIT_PER_KEY_DAY` | `20` | submissions per submitter key per day |
 | `LIMIT_GLOBAL_HOUR` | `60` | submissions per hour (all IPs) before PRs open as drafts |
+| `BANNED_KEYS` | empty | comma-separated key fingerprints (`sms:…`) refused with `403` |
 
 ### 5. Create the GitHub token
 
@@ -145,21 +170,22 @@ curl https://dcs-sms-ingest.<subdomain>.workers.dev/v1/health
 # {"ok":true}
 ```
 
-A real submission. **This opens a real PR** — close it without merging
-afterwards:
+A real submission has to be signed, so plain `curl` can't make one any more.
+Test from the Mission Editor instead (step 9): the first **Submit** creates
+your key and opens a PR. Check that PR: it adds `prefabs/<slug>.prefab` and
+`prefabs/<slug>.meta.json` (plus `images/<slug>/<n>.<ext>` when images are
+attached), is labelled `community-submission`, shows your key fingerprint, and
+its `validate` check passes. Close it without merging afterwards.
+
+An unsigned request is a quick check that the submit route is live and
+enforcing signatures. It should be refused:
 
 ```sh
-printf 'return {\n  meta = { name = "Ingest Test" },\n  groups = {},\n}\n' > /tmp/test.prefab
+printf 'return {}\n' > /tmp/t.prefab
 curl -X POST https://dcs-sms-ingest.<subdomain>.workers.dev/v1/submit \
-  -F 'meta={"name":"Ingest Test (delete me)","author":"you","description":"Setup check. Close without merging.","tags":["test"],"client":"curl"};type=application/json' \
-  -F 'prefab=@/tmp/test.prefab'
-# {"submission_id":"…","pr_url":"https://github.com/<owner>/<repo>/pull/N"}
+  -F 'meta={"name":"x","author":"x","description":"x"}' -F 'prefab=@/tmp/t.prefab'
+# 401 {"error":"unsigned submission; update the dcs-sms mod to share prefabs"}
 ```
-
-Open the PR and check: it adds `prefabs/<slug>.prefab` and
-`prefabs/<slug>.meta.json` (plus `images/<slug>/<n>.<ext>` when images are
-attached), is labelled `community-submission`, and its `validate` check passes.
-Then close it without merging and delete its branch.
 
 ### 9. Connect the mod
 
@@ -186,6 +212,7 @@ The mod also needs the LuaSec payload in `Saved Games\DCS\dcs-sms\lib\`
 - **Redeploy after code changes:** `npx wrangler deploy`.
 - **Live logs:** `npx wrangler tail` streams every request, including the
   GitHub error behind a `502`.
+- **Ban a submitter key:** add its fingerprint (from the PR body) to `BANNED_KEYS` and redeploy. Regenerating a key is free, but they lose their history and any author name the old key claimed.
 - **Rotate the token** (or when it expires): create a new one (step 5), run
   `npx wrangler secret put GITHUB_TOKEN` again. Takes effect immediately, no
   redeploy.
@@ -195,6 +222,8 @@ The mod also needs the LuaSec payload in `Saved Games\DCS\dcs-sms\lib\`
 
 | Symptom | Cause / fix |
 |---|---|
+| `401 … clock is N minute(s) behind/ahead` | The submitter's PC clock is wrong. Signatures are only accepted within 5 minutes of real time. |
+| `401 unsigned submission` | A client without signing, e.g. a hand-made curl request or an old mod build. |
 | `Wrangler requires at least Node.js v22.0.0` | Old Node — see Prerequisites (nvm). |
 | `502 {"error":"submission could not be forwarded…"}` | A GitHub call failed. `npx wrangler tail` shows which. Usually: token missing (`secret put` not run), expired, lacking Contents/Pull requests write, or scoped to a different repo; or `GITHUB_REPO` is wrong. |
 | `429` during testing | The per-IP limit (10/hour). Wait for the hour to roll over, or raise `LIMIT_PER_IP_HOUR`. |

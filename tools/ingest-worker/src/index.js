@@ -7,14 +7,17 @@
 // the gate, and the catalog's validate.yml runs on the PR to prove the prefab
 // is pure data. See docs/superpowers/specs/2026-09-19-community-prefab-upload.md.
 //
-// This first version carries no client authentication (no shared-key HMAC, no
-// Ed25519 identity). Both are additive headers on the same POST; until then
-// the protections are the size caps, the per-IP limit, the global draft
-// breaker, and the manual merge.
+// Every submission is signed with the submitter's per-install Ed25519 key
+// (auth.js). The key is trusted on first use (identity.js): it proves "same
+// submitter as before", never who they are. The shared-key HMAC layer from the
+// spec is not implemented. Other protections: size caps, per-IP and per-key
+// limits, the global draft breaker, and the manual merge.
 
 import { parseSubmission, buildSidecar, slugify, SubmissionError } from './submission.js';
 import { makeClient } from './github.js';
 import * as ratelimit from './ratelimit.js';
+import * as auth from './auth.js';
+import * as identity from './identity.js';
 
 function json(status, body, headers = {}) {
   return new Response(JSON.stringify(body), {
@@ -33,7 +36,10 @@ function config(env) {
     repo: env.GITHUB_REPO || 'wrycu/dcs-sms-prefabs',
     base: env.BASE_BRANCH || 'main',
     perIp: Number(env.LIMIT_PER_IP_HOUR || 10),
+    perKeyHour: Number(env.LIMIT_PER_KEY_HOUR || 5),
+    perKeyDay: Number(env.LIMIT_PER_KEY_DAY || 20),
     globalDraft: Number(env.LIMIT_GLOBAL_HOUR || 60),
+    banned: String(env.BANNED_KEYS || '').split(',').map((k) => k.trim()).filter(Boolean),
   };
 }
 
@@ -69,18 +75,26 @@ function shaLine(sha) {
   return `- Prefab SHA-256: \`${sha}\``;
 }
 
-function prBody(meta, sha, draft) {
+function prBody(meta, sha, draft, who) {
   const lines = [
-    `**${meta.name}** by **${meta.author}** (self-declared, unverified)`,
+    `**${meta.name}** by **${meta.author}** (self-declared)`,
     '',
     meta.description,
     '',
     `- Tags: ${meta.tags.length ? meta.tags.join(', ') : '(none)'}`,
     shaLine(sha),
+    `- Submitter key: \`${who.fingerprint}\` — ${who.priorSubmissions === 0
+      ? 'first submission from this key'
+      : `${who.priorSubmissions} earlier submission(s) from this key`}`,
     `- Client: ${meta.client || '(unknown)'}`,
   ];
+  if (who.handleConflict) {
+    lines.push('', `> **Author name conflict:** "${meta.author}" was first used by a different key ` +
+      `(\`${who.handleOwner}\`). Check this isn't someone else's name before merging.`);
+  }
   if (draft) lines.push('', '> Opened as a draft: the hourly submission breaker tripped.');
-  lines.push('', '_Submitted from the Mission Editor via the dcs-sms ingest worker._');
+  lines.push('', '_Submitted from the Mission Editor via the dcs-sms ingest worker. ' +
+    'The key proves the same submitter as before, not who they are._');
   return lines.join('\n');
 }
 
@@ -90,12 +104,16 @@ export async function submit(request, env, deps = {}) {
   const cfg = config(env);
 
   const sub = await parseSubmission(request);
+  const nowSec = Math.floor(now().getTime() / 1000);
+  const signer = await auth.verify(request.headers, sub.metaText,
+    { kv: env.RATE_KV, nowSec, banned: cfg.banned });
 
   const ip = request.headers.get('cf-connecting-ip') || '';
-  const rl = await ratelimit.check(env.RATE_KV, ip, cfg, Math.floor(now().getTime() / 1000));
+  const rl = await ratelimit.check(env.RATE_KV, ip, cfg, nowSec, signer.fingerprint);
   if (!rl.allowed) {
-    return json(429, { error: 'too many submissions; try again later' },
-      { 'retry-after': String(rl.retryAfter) });
+    const why = rl.reason === 'key-day' ? 'too many submissions today; try again tomorrow'
+      : 'too many submissions; try again later';
+    return json(429, { error: why }, { 'retry-after': String(rl.retryAfter) });
   }
 
   const sha = await sha256Hex(sub.prefab);
@@ -121,7 +139,14 @@ export async function submit(request, env, deps = {}) {
   const slug = await freeSlug(gh, cfg, slugify(sub.meta.name), index);
   const imagePaths = sub.images.map((img, i) => `${slug}/${i + 1}.${img.ext}`);
   const stamp = now().toISOString().replace(/\.\d{3}Z$/, 'Z');
-  const sidecar = buildSidecar(sub.meta, imagePaths, stamp);
+  const sidecar = buildSidecar(sub.meta, imagePaths, stamp, signer.fingerprint);
+  const known = await identity.lookup(env.RATE_KV, signer.fingerprint, sub.meta.author);
+  const who = {
+    fingerprint: signer.fingerprint,
+    priorSubmissions: known.priorSubmissions,
+    handleOwner: known.handleOwner,
+    handleConflict: known.handleOwner !== null && known.handleOwner !== signer.fingerprint,
+  };
 
   const files = [
     { path: `prefabs/${slug}.prefab`, bytes: sub.prefab },
@@ -136,11 +161,15 @@ export async function submit(request, env, deps = {}) {
     files,
     message: `add prefab: ${sub.meta.name}`,
     title: `Community submission: ${sub.meta.name}`,
-    body: prBody(sub.meta, sha, rl.draft),
+    body: prBody(sub.meta, sha, rl.draft, who),
     draft: rl.draft,
-    labels: ['community-submission'],
+    labels: who.handleConflict
+      ? ['community-submission', 'needs-review: handle-conflict']
+      : ['community-submission'],
   });
-  return json(202, { submission_id: submissionId, pr_url: pr.url });
+  // Only an accepted submission registers the key / claims the name.
+  await identity.record(env.RATE_KV, signer.fingerprint, sub.meta.author, stamp);
+  return json(202, { submission_id: submissionId, pr_url: pr.url, submitter_key: signer.fingerprint });
 }
 
 export async function handle(request, env, deps = {}) {

@@ -6,7 +6,11 @@ compatibility_date = "2026-09-01"
 GITHUB_REPO = "wrycu/dcs-sms-prefabs"
 BASE_BRANCH = "main"
 LIMIT_PER_IP_HOUR = "10"
+LIMIT_PER_KEY_HOUR = "5"
+LIMIT_PER_KEY_DAY = "20"
 LIMIT_GLOBAL_HOUR = "60"
+# Comma-separated submitter-key fingerprints (sms:…) to refuse with 403.
+BANNED_KEYS = ""
 
 # Hourly rate-limit counters. Create with:
 #   npx wrangler kv namespace create RATE_KV

@@ -102,34 +102,74 @@ local function fake_transport(script)
     return t
 end
 
+-- RFC 8032 TEST 1 keypair as a fixed identity. The provider may yield via
+-- tick, like the real load_or_create does while generating.
+local function unhex(h) return (h:gsub('..', function(c) return string.char(tonumber(c, 16)) end)) end
+local ID = { seed = unhex('9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60'),
+             pub  = unhex('d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a') }
+local function identity(tick) tick(); return ID end
+local function new_job(t) return share.new(t, { identity = identity, now = function() return 1790000000 end }) end
+
+-- Step through the signing phase; returns the first non-'signing' state.
+local function sign_through(j)
+    local st, n = 'signing', 0
+    while st == 'signing' and n < 10000 do st = j:step(); n = n + 1 end
+    return st, n
+end
+
 cfg.SUBMIT_URL = ''
-local j = share.new(fake_transport({}))
+local j = new_job(fake_transport({}))
 local ok, err = j:start(form())
 check('unconfigured endpoint refuses to start', not ok and err:find('not configured', 1, true), err)
 
 cfg.SUBMIT_URL = 'https://ingest.example/v1/submit'
+ok, err = share.new(fake_transport({})):start(form())
+check('no identity provider refuses to start', not ok and err:find('identity', 1, true), err)
+
 local t = fake_transport({ { 'pending' }, { 'pending' },
     { 'done', { status = 202, body = '{"pr_url":"https://github.com/o/r/pull/9"}' } } })
-j = share.new(t)
+j = new_job(t)
 ok, err = j:start(form())
 check('start ok when configured + valid', ok == true, err)
+check('starts in the signing phase, nothing posted yet', j.state == 'signing' and t.posted == nil)
+local st, steps = sign_through(j)
+check('signing spreads over several steps, then runs', st == 'running' and steps > 5, st .. ' after ' .. steps)
 check('posts to SUBMIT_URL with multipart content type', t.posted.url == cfg.SUBMIT_URL
       and t.posted.headers['Content-Type']:match('^multipart/form%-data; boundary=') ~= nil)
+local h = t.posted.headers
+check('signed headers present', h['X-SMS-PubKey'] and h['X-SMS-Timestamp'] == '1790000000'
+      and h['X-SMS-Nonce'] and #h['X-SMS-Nonce'] == 32 and h['X-SMS-Signature'], h['X-SMS-Timestamp'])
+check('fingerprint exposed on the job', type(j.fingerprint) == 'string' and j.fingerprint:match('^sms:%x+$') ~= nil, j.fingerprint)
+-- The signed meta is byte-identical to the meta part that is sent.
+local meta_sent = t.posted.body:match('name="meta"\r\nContent%-Type: application/json\r\n\r\n(.-)\r\n%-%-')
+check('meta part equals build_meta (the signed bytes)', meta_sent == share.build_meta(form()), meta_sent)
 check('step returns running while pending', j:step() == 'running' and j:step() == 'running')
 check('progress readable mid-upload', j:progress() == 1)
 check('step returns done on reply', j:step() == 'done')
 check('result carries the PR url', j.result.ok and j.result.pr_url == 'https://github.com/o/r/pull/9')
 
-ok, err = share.new(fake_transport({})):start(form({ description = '' }))
+ok, err = new_job(fake_transport({})):start(form({ description = '' }))
 check('invalid form refused before any request', not ok and err == 'Description is required.', err)
 
+j = share.new(fake_transport({}), { identity = function() return nil, 'identity.json is not valid JSON' end })
+j:start(form())
+check('identity failure surfaces as error, nothing posted', sign_through(j) == 'error'
+      and j.error:find('not valid JSON', 1, true), j.error)
+
 t = fake_transport({ { 'error', 'connect: refused' } })
-j = share.new(t); j:start(form())
+j = new_job(t); j:start(form()); sign_through(j)
 check('transport error surfaces as error state', j:step() == 'error' and j.error == 'connect: refused', j.error)
 
 t = fake_transport({ { 'pending' } })
-j = share.new(t); j:start(form()); j:step(); j:cancel()
-check('cancel closes the socket and idles the job', t.closed and j.state == 'idle' and j:step() == 'idle')
+j = new_job(t); j:start(form()); j:step(); j:cancel()
+check('cancel during signing idles the job, nothing posted', j.state == 'idle' and t.posted == nil and j:step() == 'idle')
+
+t = fake_transport({ { 'pending' } })
+j = new_job(t); j:start(form()); sign_through(j); j:step(); j:cancel()
+check('cancel during upload closes the socket', t.closed and j.state == 'idle')
+
+r = share.interpret({ status = 401, body = '{"error":"your computer clock is off"}' })
+check('401 carries the worker reason', not r.ok and r.message:find('clock', 1, true), r.message)
 
 if failures > 0 then os.exit(1) end
 print('All share_submit tests passed.')

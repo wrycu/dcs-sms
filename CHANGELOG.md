@@ -127,7 +127,10 @@ This is the first tag after a long quiet period — `sms.version` had been froze
   PR. The prefab is checked locally with the same pure-data rules the catalog
   enforces before anything is sent. Downloaded Community prefabs can't be
   re-shared. Uploads stay disabled until `community_config.SUBMIT_URL` is set.
-  First version: no submitter signing yet (see the upload spec).
+  Every submission is signed with a per-install Ed25519 key, created on first
+  use and kept in `Saved Games\DCS\dcs-sms\identity.json` (back it up — it is
+  how the catalog knows later submissions are yours). The dialog shows its
+  fingerprint. The key proves "same submitter as before", not identity.
 
 **Fixed**
 - The HTTPS transport no longer re-sends bytes after a partial write that

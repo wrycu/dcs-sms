@@ -107,7 +107,7 @@ async function partBytes(part) {
 }
 
 // Parse a Request into a validated submission:
-//   { meta, prefab: Uint8Array, images: [{ bytes, ext }] }
+//   { meta, metaText, prefab: Uint8Array, images: [{ bytes, ext }] }
 // Throws SubmissionError on anything the client should be told about.
 export async function parseSubmission(request) {
   const declared = Number(request.headers.get('content-length') || 0);
@@ -126,7 +126,9 @@ export async function parseSubmission(request) {
 
   const metaPart = form.get('meta');
   if (metaPart === null) throw new SubmissionError(400, 'missing meta part');
-  const meta = parseMeta(typeof metaPart === 'string' ? metaPart : await metaPart.text());
+  // Kept verbatim: the client signs these exact bytes (see auth.js).
+  const metaText = typeof metaPart === 'string' ? metaPart : await metaPart.text();
+  const meta = parseMeta(metaText);
 
   const prefabPart = form.get('prefab');
   if (prefabPart === null || typeof prefabPart === 'string') {
@@ -158,12 +160,14 @@ export async function parseSubmission(request) {
   }
   if (total > CAPS.bodyBytes) throw new SubmissionError(413, 'submission is larger than 24 MB');
 
-  return { meta, prefab, images };
+  return { meta, metaText, prefab, images };
 }
 
 // The catalog sidecar for a submission. `name` is carried explicitly so the
 // entry keeps the submitter's display name rather than the prefab's meta.name.
-export function buildSidecar(meta, imagePaths, submittedUtc) {
+// `submitterKey` is the signing key's fingerprint: published so authorship can
+// be traced from the repo alone. gen_index.py ignores unknown sidecar keys.
+export function buildSidecar(meta, imagePaths, submittedUtc, submitterKey) {
   return {
     name: meta.name,
     author: meta.author,
@@ -171,5 +175,6 @@ export function buildSidecar(meta, imagePaths, submittedUtc) {
     tags: meta.tags,
     images: imagePaths,
     submitted_utc: submittedUtc,
+    submitter_key: submitterKey,
   };
 }

@@ -143,14 +143,21 @@ end
 
 -- Build the request body. `f` as for validate(); `boundary` is optional (tests
 -- pass a fixed one). Returns body, content_type.
-function M.build_multipart(f, boundary)
-    local meta = M.json_encode({
+-- The `meta` part's JSON. Built once per submission: these exact bytes are
+-- both signed (share_identity) and sent, and the worker verifies against them.
+function M.build_meta(f)
+    return M.json_encode({
         name        = trim(f.name),
         author      = trim(f.author),
         description = trim(f.description),
         tags        = f.tags or {},
         client      = f.client or '',
     })
+end
+
+-- `meta` (optional) is a pre-built build_meta(f) string.
+function M.build_multipart(f, boundary, meta)
+    meta = meta or M.build_meta(f)
     -- A boundary must not occur inside any part. Random 96-bit boundaries make
     -- that astronomically unlikely; check anyway, it's cheap next to the upload.
     local contents = { meta, f.prefab }
@@ -219,21 +226,32 @@ function M.interpret(resp)
     if status == 429 then
         return { ok = false, message = 'Too many submissions from this connection — try again in an hour.' }
     end
-    if status == 413 or status == 400 then
+    -- 401: signature / clock / replay problems; 403: key banned. The worker's
+    -- message says which, e.g. that the PC clock is off.
+    if status == 413 or status == 400 or status == 401 or status == 403 then
         return { ok = false, message = 'Rejected: ' .. (err or ('HTTP ' .. status)) }
     end
     return { ok = false, message = 'Submission failed: ' .. (err or ('HTTP ' .. tostring(status))) }
 end
 
 -- ---- job -------------------------------------------------------------------
+--
+-- A job runs in two phases, both advanced by :step() once per editor frame:
+--   'signing' — a coroutine loads (or on first use creates) the submitter
+--               keypair and signs the envelope; the Ed25519 work yields every
+--               few ladder steps so the editor never stalls.
+--   'running' — the transport uploads the signed request and reads the reply.
 
 local Job = {}
 Job.__index = Job
 
 -- `transport` must provide :post(url, headers, body) (community_transport).
-function M.new(transport)
-    return setmetatable({ transport = transport, state = 'idle', req = nil,
-                          result = nil, error = nil }, Job)
+-- `opts.identity(tick)` returns { seed, pub } or nil, err — may yield through
+-- `tick`. `opts.now()` returns unix seconds (default os.time).
+function M.new(transport, opts)
+    opts = opts or {}
+    return setmetatable({ transport = transport, identity = opts.identity, now = opts.now or os.time,
+                          state = 'idle', co = nil, req = nil, result = nil, error = nil }, Job)
 end
 
 -- Start uploading form `f`. Returns true, or nil + message (validation or
@@ -245,23 +263,49 @@ function Job:start(f)
     if type(url) ~= 'string' or url == '' then
         return nil, 'Community uploads are not configured in this build.'
     end
-    local body, ctype = M.build_multipart(f)
-    self.req = self.transport:post(url, { ['Content-Type'] = ctype }, body)
-    self.state = 'running'; self.result = nil; self.error = nil
+    if type(self.identity) ~= 'function' then return nil, 'No submitter identity available.' end
+    local identity_mod = require('dcs_sms_me.share_identity')
+    self.result = nil; self.error = nil; self.req = nil
+    self.co = coroutine.create(function()
+        local tick = coroutine.yield
+        local id, ierr = self.identity(tick)
+        if not id then error('submitter key: ' .. tostring(ierr), 0) end
+        self.fingerprint = identity_mod.fingerprint(id.pub)
+        local meta = M.build_meta(f)
+        local headers = identity_mod.sign_headers(id, meta, self.now(), tick)
+        local body, ctype = M.build_multipart(f, nil, meta)
+        headers['Content-Type'] = ctype
+        self.req = self.transport:post(url, headers, body)
+    end)
+    self.state = 'signing'
     return true
 end
 
--- Advance one non-blocking step. Returns the state: 'running' | 'done' | 'error' | 'idle'.
+local function fail(self, msg)
+    self.state = 'error'; self.error = tostring(msg); self.req = nil; self.co = nil
+end
+
+-- Advance one non-blocking step. Returns the state:
+-- 'signing' | 'running' | 'done' | 'error' | 'idle'.
 function Job:step()
+    if self.state == 'signing' then
+        local ok, err = coroutine.resume(self.co)
+        if not ok then fail(self, err); return self.state end
+        if coroutine.status(self.co) == 'dead' then
+            self.co = nil
+            if self.req then self.state = 'running' else fail(self, 'request was not created') end
+        end
+        return self.state
+    end
     if self.state ~= 'running' or not self.req then return self.state end
     local ok, status, payload = pcall(self.req.poll)
     if not ok then
-        self.state = 'error'; self.error = tostring(status); self.req = nil
+        fail(self, status)
     elseif status == 'done' then
         self.result = M.interpret(payload)
         self.state = 'done'; self.req = nil
     elseif status == 'error' then
-        self.state = 'error'; self.error = tostring(payload); self.req = nil
+        fail(self, payload)
     end
     return self.state
 end
@@ -274,10 +318,10 @@ function Job:progress()
     return sent / total
 end
 
--- Abandon an in-flight upload and close its socket.
+-- Abandon an in-flight upload (or signing) and close its socket.
 function Job:cancel()
     if self.req and self.req.close then pcall(self.req.close) end
-    self.req = nil; self.state = 'idle'
+    self.req = nil; self.co = nil; self.state = 'idle'
 end
 
 return M

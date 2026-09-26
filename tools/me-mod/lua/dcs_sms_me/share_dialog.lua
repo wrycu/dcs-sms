@@ -22,6 +22,7 @@ local sms_skins; do local ok, m = pcall(require, 'dcs_sms_me.sms_skins'); if ok 
 local lfs   = require('lfs')
 local paths = require('dcs_sms_me.paths')
 local share = require('dcs_sms_me.share_submit')
+local identity = require('dcs_sms_me.share_identity')
 
 local M = {}
 local W = {}   -- single dialog instance
@@ -109,10 +110,27 @@ local function set_busy(busy)
 end
 
 -- Pumped by UpdateManager every frame; cheap no-op when idle.
+-- Show the submitter key: the fingerprint once a key exists, else a note that
+-- the first submission creates one.
+local function refresh_key_label(fp)
+    if not W.key_lbl then return end
+    if not fp then
+        local id = identity.load(paths.ROOT)
+        fp = id and identity.fingerprint(id.pub)
+    end
+    local text = fp and ('Your submitter key: ' .. fp .. '  (back up identity.json to keep it)')
+        or 'A submitter key is created on your first submission (saved as identity.json).'
+    pcall(function() W.key_lbl:setText(text) end)
+end
+
 local function tick()
     local job = W.job
-    if not job or job.state ~= 'running' then return end
+    if not job or (job.state ~= 'running' and job.state ~= 'signing') then return end
     local state = job:step()
+    if state == 'signing' then
+        status(W.new_key and 'Creating your submitter key…' or 'Signing…')
+        return
+    end
     if state == 'running' then
         local pct = math.floor(job:progress() * 100)
         status(pct < 100 and ('Uploading… ' .. pct .. '%') or 'Waiting for the server…')
@@ -121,6 +139,7 @@ local function tick()
     set_busy(false)
     W.job = nil
     if state == 'done' and job.result then
+        if job.fingerprint then refresh_key_label(job.fingerprint) end
         if job.result.ok then
             W.pr_url = job.result.pr_url
             pcall(function() W.open_btn:setVisible(W.pr_url ~= nil) end)
@@ -187,7 +206,12 @@ local function on_submit()
         pcall(function() log.write('sms.me.share', log.ERROR, 'UpdateManager.add unavailable') end)
         return
     end
-    local job = share.new(transport)
+    W.new_key = identity.load(paths.ROOT) == nil
+    local job = share.new(transport, {
+        -- Loads identity.json, or creates it on first use; tick = yield so
+        -- key generation and signing spread across editor frames.
+        identity = function(tick_fn) return identity.load_or_create(paths.ROOT, tick_fn) end,
+    })
     local ok, err = job:start(form)
     if not ok then status(err, 'warning'); return end
 
@@ -236,6 +260,8 @@ local function relayout(x, y, w, h)
         set(s.check, x + col * math.floor(w / 2), cy + row * ROW_H, math.floor(w / 2) - 4, ROW_H)
     end
     local by = y + h - ROW_H
+    set(W.key_lbl, x, by - ROW_H - GAP, w - 110, ROW_H)
+    set(W.key_btn, x + w - 105, by - ROW_H - GAP, 105, ROW_H)
     set(W.folder_btn, x, by, 150, ROW_H)
     set(W.open_btn, x + w - 290, by, 110, ROW_H)
     set(W.submit_btn, x + w - 175, by, 85, ROW_H)
@@ -331,6 +357,18 @@ function M.open(row, parent)
         pcall(function() lfs.mkdir(shot_dir) end)
         os.execute('explorer "' .. shot_dir .. '"')
     end)
+    W.key_lbl = label(raw, '')
+    W.key_btn = button(raw, 'Show key file', function()
+        local path = paths.ROOT .. identity.FILE
+        local f = io.open(path, 'rb')
+        if f then
+            f:close()
+            os.execute('explorer /select,"' .. path .. '"')
+        else
+            status('No key yet — it is created on your first submission.', 'info')
+        end
+    end)
+    refresh_key_label()
     W.open_btn   = button(raw, 'Open PR', on_open_pr)
     pcall(function() W.open_btn:setVisible(false) end)
     W.submit_btn = button(raw, 'Submit', on_submit)
