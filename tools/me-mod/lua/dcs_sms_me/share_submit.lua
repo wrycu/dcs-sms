@@ -207,6 +207,11 @@ function M.interpret(resp)
     end
     local err = field(body, 'error')
     if status == 409 then
+        -- pr_url present = an identical prefab is in an open PR, not merged yet.
+        local pending = field(body, 'pr_url')
+        if pending then
+            return { ok = false, message = 'Already submitted and awaiting review: ' .. pending }
+        end
         local existing = field(body, 'existing')
         return { ok = false, message = 'Already in the catalog'
                  .. (existing and (' as "' .. existing .. '"') or '') .. '.' }

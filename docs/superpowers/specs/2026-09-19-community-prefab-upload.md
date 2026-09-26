@@ -420,7 +420,8 @@ A minimal end-to-end slice landed ahead of the phases above, **without either
 auth layer**:
 
 - **Worker** — `tools/ingest-worker/` (Cloudflare, plain JS). Wire format,
-  caps, `202/400/409/413/429` replies, sha256 dedup against `index.json`, slug
+  caps, `202/400/409/413/429` replies, sha256 dedup against `index.json` and
+  open submission PRs (matched on the hash line in the PR body), slug
   + `-N` collision suffix, one-commit PR via the Git Data API, per-IP hourly
   limit and the global draft breaker (Workers KV). No HMAC, no Ed25519, so no
   ownership, handle binding, updates-as-revisions or re-upload flag yet.

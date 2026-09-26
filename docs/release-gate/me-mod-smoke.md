@@ -565,7 +565,8 @@ Needs `community_config.SUBMIT_URL` pointing at a deployed ingest worker (`tools
 - [ ] Fill every field, tick one screenshot, **Submit** → footer counts up "Uploading… N%" then "Submitted for review"; the map stays pannable throughout; **Open PR** appears and opens the PR in the browser.
 - [ ] The PR adds `prefabs/<slug>.prefab`, `<slug>.meta.json` and `images/<slug>/1.<ext>`, is labelled `community-submission`, and its `validate` check passes.
 - [ ] Reopen the dialog → Author is remembered.
-- [ ] Submit the same prefab again after that PR is merged → "Already in the catalog as ..."; no new PR.
+- [ ] Submit the same prefab again while its PR is still open → "Already submitted and awaiting review: <PR link>"; no new PR. Close that PR, submit again → accepted.
+- [ ] Submit a prefab whose PR was merged → "Already in the catalog as ..."; no new PR.
 - [ ] Start an upload with several large screenshots and press **Stop** → "Upload stopped."; no PR is opened.
 - [ ] Close the dialog mid-upload, then choose Share again → the running dialog comes back with its progress.
 - [ ] With the Share dialog open, exit the Mission Editor to the main menu → the dialog hides along with the Prefab Manager; re-entering the ME shows neither.

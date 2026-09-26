@@ -21,7 +21,7 @@ function fakeKV() {
 
 // Fake GitHub + raw.githubusercontent. Records every call; `existing` is the
 // set of repo paths that exist on main; `index` is the served manifest.
-function fakeGitHub({ existing = [], index = [] } = {}) {
+function fakeGitHub({ existing = [], index = [], openPrs = [] } = {}) {
   const calls = [];
   const blobs = [];
   const fetchFn = async (url, init = {}) => {
@@ -35,6 +35,7 @@ function fakeGitHub({ existing = [], index = [] } = {}) {
       const p = decodeURI(path.slice('/contents/'.length).split('?')[0]);
       return existing.includes(p) ? ok({ path: p }) : new Response('{}', { status: 404 });
     }
+    if (method === 'GET' && path === '/pulls?state=open&per_page=100') return ok(openPrs);
     if (path === '/git/ref/heads/main') return ok({ object: { sha: 'base-sha' } });
     if (path === '/git/commits/base-sha') return ok({ tree: { sha: 'base-tree' } });
     if (path === '/git/blobs') { blobs.push(body); return ok({ sha: `blob-${blobs.length}` }, 201); }
@@ -147,6 +148,35 @@ test('a prefab already in the catalog is rejected with 409', async () => {
   assert.equal(res.status, 409);
   assert.equal((await res.json()).existing, 'Existing');
   assert.ok(!gh.calls.some((c) => c.url.endsWith('/pulls')));
+});
+
+test('a prefab already awaiting review in an open PR is rejected with 409', async () => {
+  // Round trip: the first submission's own PR body is what the check matches.
+  const first = fakeGitHub();
+  assert.equal((await handle(submissionRequest(), env(), { fetch: first.fetchFn, now: NOW })).status, 202);
+  const body = first.calls.find((c) => c.url.endsWith('/pulls')).body.body;
+
+  const gh = fakeGitHub({ openPrs: [{
+    number: 3, html_url: 'https://github.com/o/r/pull/3', title: 'Community submission: Test Site',
+    head: { ref: 'submission/test-site-abcd1234' }, body,
+  }] });
+  const res = await handle(submissionRequest(), env(), { fetch: gh.fetchFn, now: NOW });
+  assert.equal(res.status, 409);
+  const out = await res.json();
+  assert.equal(out.pr_url, 'https://github.com/o/r/pull/3');
+  assert.equal(out.existing, 'Test Site (awaiting review)');
+  assert.ok(!gh.calls.some((c) => c.method === 'POST'), 'no branch, commit or PR created');
+});
+
+test('open PRs that are not submissions, or carry another hash, do not block', async () => {
+  const gh = fakeGitHub({ openPrs: [
+    { number: 5, html_url: 'u5', title: 't', head: { ref: 'feature/x' },
+      body: '- Prefab SHA-256: `' + 'f'.repeat(64) + '`' },
+    { number: 6, html_url: 'u6', title: 't', head: { ref: 'submission/other-1' },
+      body: '- Prefab SHA-256: `' + '0'.repeat(64) + '`' },
+  ] });
+  const res = await handle(submissionRequest(), env(), { fetch: gh.fetchFn, now: NOW });
+  assert.equal(res.status, 202);
 });
 
 test('validation failures return 400 / 413 and never touch GitHub', async () => {

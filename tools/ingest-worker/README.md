@@ -20,7 +20,7 @@ Plain JavaScript, no dependencies, no build step.
 |---|---|
 | `202` | `{submission_id, pr_url}` |
 | `400` / `413` | `{error}` — bad or oversized submission |
-| `409` | `{error, existing}` — identical prefab already in the catalog |
+| `409` | `{error, existing}` — identical prefab already in the catalog; `{error, existing, pr_url}` — identical prefab awaiting review in an open submission PR |
 | `429` | `{error}` + `Retry-After` — per-IP hourly limit |
 | `502` | `{error}` — GitHub call failed |
 
@@ -198,7 +198,7 @@ The mod also needs the LuaSec payload in `Saved Games\DCS\dcs-sms\lib\`
 | `Wrangler requires at least Node.js v22.0.0` | Old Node — see Prerequisites (nvm). |
 | `502 {"error":"submission could not be forwarded…"}` | A GitHub call failed. `npx wrangler tail` shows which. Usually: token missing (`secret put` not run), expired, lacking Contents/Pull requests write, or scoped to a different repo; or `GITHUB_REPO` is wrong. |
 | `429` during testing | The per-IP limit (10/hour). Wait for the hour to roll over, or raise `LIMIT_PER_IP_HOUR`. |
-| `409 already in the catalog` | That exact prefab (byte-identical) is in `index.json`. Change it, or it's genuinely a duplicate. |
+| `409` (already in the catalog / awaiting review) | That exact prefab (byte-identical) is in `index.json`, or in an **open** submission PR (the body names it). Close the old PR to resubmit, or change the prefab. |
 | PR has no `validate` check | Actions is disabled on the catalog repo (common on forks) — see Prerequisites. |
 | Large submissions fail with Cloudflare error 1102 | The free plan's 10 ms CPU limit; base64-encoding big images for the GitHub API is the expensive part. Move to Workers Paid, or lower the image caps (worker `CAPS` and `share_submit.lua` `M.CAPS` together). |
 | Mod says "Community uploads are not configured in this build." | `SUBMIT_URL` is empty in the installed `community_config.lua` (step 9). |

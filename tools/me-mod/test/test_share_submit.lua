@@ -77,6 +77,9 @@ local r = share.interpret({ status = 202, body = '{"submission_id":"x","pr_url":
 check('202 -> ok with PR url', r.ok and r.pr_url == 'https://github.com/o/r/pull/7', r.message)
 r = share.interpret({ status = 409, body = '{"error":"dup","existing":"2 x ZSU"}' })
 check('409 names the existing entry', not r.ok and r.message:find('2 x ZSU', 1, true), r.message)
+r = share.interpret({ status = 409, body = '{"error":"pending","existing":"x (awaiting review)","pr_url":"https://github.com/o/r/pull/3"}' })
+check('409 with pr_url -> awaiting review + link', not r.ok
+      and r.message == 'Already submitted and awaiting review: https://github.com/o/r/pull/3', r.message)
 r = share.interpret({ status = 429, body = '{"error":"slow"}' })
 check('429 -> try again later', not r.ok and r.message:find('try again', 1, true), r.message)
 r = share.interpret({ status = 413, body = '{"error":"prefab is larger than 2 MB"}' })

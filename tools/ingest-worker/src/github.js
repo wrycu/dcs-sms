@@ -54,6 +54,20 @@ export function makeClient({ token, repo, fetchFn = fetch }) {
       return r !== null;
     },
 
+    // First open submission PR (branch `submission/…`) whose body contains
+    // `needle`, or null. Only the first page (100 PRs) is scanned — far more
+    // than a manually-reviewed queue should ever hold.
+    async findOpenSubmission(needle) {
+      const prs = await call('GET', '/pulls?state=open&per_page=100');
+      for (const pr of prs || []) {
+        const ref = (pr.head && pr.head.ref) || '';
+        if (ref.startsWith('submission/') && (pr.body || '').includes(needle)) {
+          return { number: pr.number, url: pr.html_url, title: pr.title || '' };
+        }
+      }
+      return null;
+    },
+
     // Commit `files` ([{ path, bytes }]) onto a new branch cut from `base`,
     // then open a PR. Returns { number, url }.
     async openPullRequest({ base, branch, files, message, title, body, draft, labels }) {

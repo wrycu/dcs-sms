@@ -63,6 +63,12 @@ async function freeSlug(gh, cfg, base, index) {
   throw new SubmissionError(409, 'could not find a free name for this prefab; rename it and retry');
 }
 
+// The PR-body line carrying the prefab hash. findOpenSubmission matches on it,
+// so prBody and the duplicate check must share this exact format.
+function shaLine(sha) {
+  return `- Prefab SHA-256: \`${sha}\``;
+}
+
 function prBody(meta, sha, draft) {
   const lines = [
     `**${meta.name}** by **${meta.author}** (self-declared, unverified)`,
@@ -70,7 +76,7 @@ function prBody(meta, sha, draft) {
     meta.description,
     '',
     `- Tags: ${meta.tags.length ? meta.tags.join(', ') : '(none)'}`,
-    `- Prefab SHA-256: \`${sha}\``,
+    shaLine(sha),
     `- Client: ${meta.client || '(unknown)'}`,
   ];
   if (draft) lines.push('', '> Opened as a draft: the hourly submission breaker tripped.');
@@ -98,6 +104,20 @@ export async function submit(request, env, deps = {}) {
   if (dup) return json(409, { error: 'this prefab is already in the catalog', existing: dup.name });
 
   const gh = makeClient({ token: env.GITHUB_TOKEN, repo: cfg.repo, fetchFn });
+  // A byte-identical prefab still awaiting review is also a duplicate, or
+  // repeated Submit clicks fill the queue with copies. Matched on the hash
+  // line prBody() writes. Closed PRs don't count: a rejected submission can
+  // be fixed and resent. `existing` keeps older clients' "Already in the
+  // catalog as …" message truthful; newer ones use pr_url.
+  const pending = await gh.findOpenSubmission(shaLine(sha));
+  if (pending) {
+    const name = pending.title.replace(/^Community submission: /, '');
+    return json(409, {
+      error: 'this prefab is already awaiting review',
+      existing: `${name} (awaiting review)`,
+      pr_url: pending.url,
+    });
+  }
   const slug = await freeSlug(gh, cfg, slugify(sub.meta.name), index);
   const imagePaths = sub.images.map((img, i) => `${slug}/${i + 1}.${img.ext}`);
   const stamp = now().toISOString().replace(/\.\d{3}Z$/, 'Z');
