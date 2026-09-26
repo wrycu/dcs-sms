@@ -160,6 +160,7 @@ end
 --   Rename
 --   Delete
 --   (separator)
+--   Share to community...   (hidden on downloaded Community rows)
 --   Copy file contents
 --   Copy place snippet
 --   (separator)
@@ -171,7 +172,7 @@ end
 -- hide with their groups, the last one stays as the divider.
 --
 -- hooks: { on_update(row), on_move(row), on_rename(row), on_delete(row),
---          on_status(text, sev) }
+--          on_share(row), on_status(text, sev) }
 -- ---------------------------------------------------------------------------
 
 -- Build the file-row entry list. Extracted from show_for_file_row so the
@@ -210,6 +211,14 @@ function M._file_row_entries(row, hooks)
         {
             separator = true,
             visible = not is_error,
+        },
+        {
+            -- Downloaded catalog entries are hidden: they are already shared,
+            -- and re-uploading someone else's prefab is the abuse the review
+            -- flow most needs to avoid.
+            label = 'Share to community...',
+            visible = not is_error and not row.community,
+            on_click = function() if hooks.on_share then hooks.on_share(row) end end,
         },
         {
             label = 'Copy file contents',

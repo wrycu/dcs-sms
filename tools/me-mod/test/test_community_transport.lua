@@ -55,12 +55,24 @@ local function new_conn()
             if hs == 1 then return nil, 'wantread' end   -- pending
             return 1                                      -- handshake complete
         end,
-        send = function(_, data, from)
+        -- Honours LuaSocket's send(data, i, j) range. Records every byte that
+        -- actually went out in captured.wire, so tests can prove nothing was
+        -- skipped or sent twice.
+        send = function(_, data, from, to)
             sends = sends + 1
-            if sends == 1 then return nil, 'wantwrite' end          -- pending
-            if sends == 2 then return math.floor(#data / 2) end     -- partial → pending
-            captured.sent = #data
-            return #data                                            -- fully sent → recv
+            from = from or 1; to = to or #data
+            captured.wire = captured.wire or {}
+            captured.send_ranges = captured.send_ranges or {}
+            captured.send_ranges[#captured.send_ranges + 1] = to - from + 1
+            if sends == 1 then return nil, 'wantwrite' end          -- pending, nothing sent
+            if sends == 2 then                                      -- would-block after a partial write
+                local mid = from + math.floor((to - from) / 2)
+                captured.wire[#captured.wire + 1] = data:sub(from, mid)
+                return nil, 'wantwrite', mid
+            end
+            captured.wire[#captured.wire + 1] = data:sub(from, to)
+            captured.sent = to
+            return to
         end,
         receive = function(_, pat)
             recvs = recvs + 1
@@ -198,6 +210,49 @@ ca_stub.path = 'C:\\SG\\DCS\\dcs-sms\\lib\\cacert.pem'
 local reqbad = transport.request(nil, 'http://insecure.example/x')
 local sbad, pbad = reqbad.poll()
 check('non-https URL rejected', sbad == 'error' and tostring(pbad):find('https', 1, true) ~= nil, pbad)
+
+-- ---- GET: a would-block after a partial write must not resend those bytes ---
+scenario = { part1 = 'HTTP/1.0 200 OK\r\n\r\nok', part2 = '' }
+captured = {}
+drive(transport.request(nil, 'https://raw.githubusercontent.com/o/r/main/index.json'))
+local wire_get = table.concat(captured.wire or {})
+check('GET request goes out exactly once (partial write kept)',
+      wire_get:match('^GET /o/r/main/index%.json HTTP/1%.0\r\n') ~= nil
+      and select(2, wire_get:gsub('GET ', '')) == 1 and wire_get:sub(-4) == '\r\n\r\n', wire_get)
+
+local ua = 'User-Agent: dcs-sms/' .. require('dcs_sms_me.version') .. '\r\n'
+check('GET User-Agent carries the mod version', wire_get:find(ua, 1, true) ~= nil, wire_get)
+
+-- ---- POST: body delivered byte-exact, in bounded chunks, any status returned
+local big = string.rep('0123456789abcdef', 12000)   -- 192,000 bytes > SEND_CHUNK
+scenario = { part1 = 'HTTP/1.0 202 Accepted\r\nContent-Type: application/json\r\n\r\n{"pr_url":"u"}', part2 = '' }
+captured = {}
+local reqp = transport.post(nil, 'https://ingest.example.workers.dev/v1/submit',
+    { ['Content-Type'] = 'multipart/form-data; boundary=XYZ' }, big)
+local seqp, resp, errp = drive(reqp, 200)
+check('POST completes', resp ~= nil and errp == nil, errp or table.concat(seqp, ','))
+check('POST done carries status + body', resp and resp.status == 202 and resp.body == '{"pr_url":"u"}',
+      resp and (tostring(resp.status) .. ' ' .. tostring(resp.body)))
+local wire = table.concat(captured.wire or {})
+local head, sent_body = wire:match('^(.-)\r\n\r\n(.*)$')
+check('POST request line + host', head and head:match('^POST /v1/submit HTTP/1%.0\r\nHost: ingest%.example%.workers%.dev\r\n') ~= nil, head)
+check('POST Content-Length matches body', head and head:find('Content-Length: ' .. #big, 1, true) ~= nil, head)
+check('POST User-Agent carries the mod version', head and head:find(ua, 1, true) ~= nil, head)
+check('POST caller headers included', head and head:find('Content-Type: multipart/form-data; boundary=XYZ', 1, true) ~= nil, head)
+check('POST body arrives byte-exact (no gaps, no duplicates)', sent_body == big,
+      sent_body and #sent_body)
+local max_range = 0
+for _, n in ipairs(captured.send_ranges or {}) do if n > max_range then max_range = n end end
+check('POST writes are bounded per poll', max_range <= 65536, max_range)
+local sent_n, total_n = reqp.progress()
+check('progress() reports all bytes sent', sent_n == total_n and total_n == #wire, sent_n .. '/' .. total_n)
+
+-- 4xx is a result the caller reads, not a transport error.
+scenario = { part1 = 'HTTP/1.0 429 Too Many Requests\r\nRetry-After: 60\r\n\r\n{"error":"slow down"}', part2 = '' }
+captured = {}
+local _, resp429, err429 = drive(transport.post(nil, 'https://ingest.example/v1/submit', {}, 'x'))
+check('POST 429 returned as done, not error', err429 == nil and resp429 and resp429.status == 429
+      and resp429.body == '{"error":"slow down"}', err429)
 
 if failures > 0 then os.exit(1) end
 print('All community_transport tests passed.')

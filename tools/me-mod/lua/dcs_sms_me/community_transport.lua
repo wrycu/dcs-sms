@@ -1,9 +1,17 @@
--- community_transport.lua — NON-BLOCKING HTTPS GET for community_fetch.
+-- community_transport.lua — NON-BLOCKING HTTPS GET/POST for community_fetch
+-- and share_submit.
 --
 -- Satisfies the transport contract: request(url) -> req with :poll() returning
 --   'pending'              — not done yet, call again next tick
 --   'done', body           — full response body (headers stripped)
 --   'error', message       — failed
+--
+-- post(url, headers, body) -> req with the same :poll(), except 'done' carries
+-- { status = <code>, body = <string> } for EVERY HTTP status: the caller needs
+-- the server's 4xx replies (duplicate, rate-limited, ...) to tell the user why.
+-- 'error' is reserved for network/TLS failures. req.progress() returns
+-- (bytes_sent, bytes_total) for an upload progress bar; req.close() drops the
+-- connection (used to cancel).
 --
 -- CRITICAL: the Mission Editor is single-threaded PUC Lua. A blocking socket
 -- call freezes (and can CRASH) the editor — so EVERY socket operation here runs
@@ -20,6 +28,10 @@
 -- falls back to the copy installed next to the mod when lib\ has none.
 
 local ca = require('dcs_sms_me.community_ca')
+
+-- Sent on every request so server-side logs (GitHub, the ingest worker) can
+-- tell which mod release is calling.
+local USER_AGENT = 'dcs-sms/' .. tostring(require('dcs_sms_me.version'))
 local M = {}
 
 -- Lazy, cached require of LuaSec. false (not nil) once known-missing so the
@@ -67,7 +79,18 @@ local MAX_POLLS = 3600
 -- and the editor stays responsive. 16 KB ≈ one TLS record.
 local RECV_CHUNK = 16384
 
-function M.request(_, url)
+-- Write at most this many bytes per poll, for the same reason: a multi-MB
+-- upload handed to one send() call would block the tick while the kernel
+-- buffer drains. Bounded writes spread it across ticks.
+local SEND_CHUNK = 65536
+
+-- An upload of up to 24 MB can legitimately outlast MAX_POLLS on a slow link,
+-- so POST gets ~10 minutes of ticks instead of ~1.
+local MAX_POLLS_POST = 36000
+
+-- Shared state machine. `build(host, path)` returns the full request bytes;
+-- `finish(code, body)` maps the response to the poll() result.
+local function open(url, build, finish, max_polls)
     local mod = load_ssl()
     if not mod then
         return { poll = function() return 'error', 'LuaSec not installed (run dcs-sms install-me-mod)' end }
@@ -83,9 +106,7 @@ function M.request(_, url)
 
     local stage    = 'connect'   -- connect → wrap → handshake → send → recv → done
     local sock, conn
-    local request  = string.format(
-        'GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: dcs-sms\r\nAccept: */*\r\nConnection: close\r\n\r\n',
-        path, host)
+    local request  = build(host, path)
     local sent     = 0
     local chunks   = {}
     local polls    = 0
@@ -159,13 +180,19 @@ function M.request(_, url)
             return 'error', 'handshake: ' .. tostring(e)
 
         elseif stage == 'send' then
-            local i, e = conn:send(request, sent + 1)
+            -- send() returns the index of the last byte written; on would-block
+            -- it returns (nil, err, last_index_written) — keep that partial
+            -- progress, or the bytes already sent go out a second time.
+            local i, e, partial = conn:send(request, sent + 1, math.min(sent + SEND_CHUNK, #request))
             if i then
                 sent = i
                 if sent >= #request then stage = 'recv' end
                 return 'pending'
             end
-            if e == 'wantwrite' or e == 'wantread' or e == 'timeout' then return 'pending' end
+            if e == 'wantwrite' or e == 'wantread' or e == 'timeout' then
+                if type(partial) == 'number' and partial > sent then sent = partial end
+                return 'pending'
+            end
             return 'error', 'send: ' .. tostring(e)
 
         elseif stage == 'recv' then
@@ -180,9 +207,7 @@ function M.request(_, url)
             if partial and #partial > 0 then chunks[#chunks + 1] = partial end
             if e == 'closed' then
                 cleanup()
-                local code, body = split_response(table.concat(chunks))
-                if code ~= 200 then return 'error', 'HTTP ' .. tostring(code) end
-                return 'done', body
+                return finish(split_response(table.concat(chunks)))
             end
             if e == nil or e == 'wantread' or e == 'wantwrite' or e == 'timeout' then
                 return 'pending'
@@ -193,9 +218,11 @@ function M.request(_, url)
     end
 
     local req = {}
+    function req.progress() return sent, #request end
+    function req.close() cleanup() end
     function req.poll()
         polls = polls + 1
-        if polls > MAX_POLLS then cleanup(); return 'error', 'timed out' end
+        if polls > max_polls then cleanup(); return 'error', 'timed out' end
         local ok, status, payload = pcall(step)
         if not ok then
             cleanup()
@@ -204,6 +231,41 @@ function M.request(_, url)
         return status, payload
     end
     return req
+end
+
+function M.request(_, url)
+    return open(url, function(host, path)
+        return string.format(
+            'GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: %s\r\nAccept: */*\r\nConnection: close\r\n\r\n',
+            path, host, USER_AGENT)
+    end, function(code, body)
+        if code ~= 200 then return 'error', 'HTTP ' .. tostring(code) end
+        return 'done', body
+    end, MAX_POLLS)
+end
+
+-- `headers` is a { [name] = value } map; Host, Content-Length and Connection
+-- are set here and must not be passed in.
+function M.post(_, url, headers, body)
+    body = body or ''
+    return open(url, function(host, path)
+        local lines = {
+            'POST ' .. path .. ' HTTP/1.0',
+            'Host: ' .. host,
+            'User-Agent: ' .. USER_AGENT,
+            'Accept: application/json',
+            'Content-Length: ' .. #body,
+            'Connection: close',
+        }
+        local names = {}
+        for k in pairs(headers or {}) do names[#names + 1] = k end
+        table.sort(names)   -- deterministic header order (tests, debugging)
+        for _, k in ipairs(names) do lines[#lines + 1] = k .. ': ' .. tostring(headers[k]) end
+        return table.concat(lines, '\r\n') .. '\r\n\r\n' .. body
+    end, function(code, resp)
+        if code == 0 then return 'error', 'malformed HTTP response' end
+        return 'done', { status = code, body = resp }
+    end, MAX_POLLS_POST)
 end
 
 return M

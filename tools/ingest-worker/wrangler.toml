@@ -1,0 +1,19 @@
+name = "dcs-sms-ingest"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+GITHUB_REPO = "wrycu/dcs-sms-prefabs"
+BASE_BRANCH = "main"
+LIMIT_PER_IP_HOUR = "10"
+LIMIT_GLOBAL_HOUR = "60"
+
+# Hourly rate-limit counters. Create with:
+#   npx wrangler kv namespace create RATE_KV
+# and paste the printed id below.
+[[kv_namespaces]]
+binding = "RATE_KV"
+id = "5f5b5db1c4394cb3a0c3d762de54ce85"
+
+# Secret (never committed):
+#   npx wrangler secret put GITHUB_TOKEN

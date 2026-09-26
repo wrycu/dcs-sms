@@ -296,6 +296,8 @@ end
 -- and so we only touch windows the user actually opened (no require here,
 -- which would needlessly construct an unopened window).
 local HIDE_ON_EXIT = {
+    -- Modal children first: hiding a modal re-enables its parent window.
+    'dcs_sms_me.share_dialog',
     'dcs_sms_me.prefab_manager',
     'dcs_sms_me.trigger_finder',
     'dcs_sms_me.mass_edit',

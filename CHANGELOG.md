@@ -116,6 +116,24 @@ This is the first tag after a long quiet period — `sms.version` had been froze
 
 ## ME-mod
 
+### [Unreleased]
+
+**Added**
+- **Share to community from the Prefab Manager.** Right-click one of your own
+  prefabs → **Share to community...** opens a form (name, author, description,
+  tags, and a checklist of your newest DCS screenshots). Submit uploads it to
+  the community ingest worker, which opens a pull request on the catalog repo
+  for a maintainer to review; the dialog shows upload progress and links the
+  PR. The prefab is checked locally with the same pure-data rules the catalog
+  enforces before anything is sent. Downloaded Community prefabs can't be
+  re-shared. Uploads stay disabled until `community_config.SUBMIT_URL` is set.
+  First version: no submitter signing yet (see the upload spec).
+
+**Fixed**
+- The HTTPS transport no longer re-sends bytes after a partial write that
+  would block. Harmless for the Community tab's short GET requests; it would
+  have corrupted multi-megabyte uploads.
+
 ### [0.28.0] — 2026-09-15
 
 **Added**

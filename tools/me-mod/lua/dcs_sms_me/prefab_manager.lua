@@ -3327,6 +3327,9 @@ function M.show()
                             on_move   = function(rr)     open_move_modal(rr) end,
                             on_rename = function(rr)     on_rename_prefab(rr) end,
                             on_delete = function(rr)     on_delete_prefab(rr) end,
+                            on_share  = function(rr)
+                                require('dcs_sms_me.share_dialog').open(rr, W.window)
+                            end,
                             on_status = function(t, sev) set_status(t, sev) end,
                         })
                     end)
