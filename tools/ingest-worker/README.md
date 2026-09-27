@@ -1,7 +1,7 @@
 # dcs-sms ingest worker
 
 Cloudflare Worker that turns an in-editor prefab submission into a pull request
-on the community catalog (`wrycu/dcs-sms-prefabs`). Design:
+on the community catalog repo (set by `GITHUB_REPO`). Design:
 [`docs/superpowers/specs/2026-09-19-community-prefab-upload.md`](../../docs/superpowers/specs/2026-09-19-community-prefab-upload.md).
 
 Plain JavaScript, no dependencies, no build step.
@@ -78,7 +78,7 @@ catalog repo.
   nvm install 22
   node --version   # v22.x
   ```
-- **The catalog repo** (`wrycu/dcs-sms-prefabs`, or your fork of it) with
+- **The catalog repo** (`nielsvaes/dcs-sms-prefabs`, or a fork of it) with
   **GitHub Actions enabled**. Forks start with Actions off: open the repo's
   **Actions** tab and click *"I understand my workflows, go ahead and enable
   them"*. Without this, submitted PRs never get the `validate` check and merges
@@ -95,13 +95,26 @@ npx wrangler login
 Answer `y` when `npx` offers to install Wrangler. A browser tab opens; click
 **Allow**.
 
-### 3. Create the rate-limit store
+### 3. Make your local config
+
+The committed `wrangler.toml` is a template with placeholders. Copy it; the
+copy is git-ignored, so your repo name and KV id never get committed:
+
+```sh
+cp wrangler.toml wrangler.local.toml
+```
+
+Every `wrangler` command that deploys or reads config takes
+`-c wrangler.local.toml`.
+
+### 4. Create the rate-limit store
 
 ```sh
 npx wrangler kv namespace create RATE_KV
 ```
 
-It prints an `id`. Put it in `wrangler.toml`:
+It prints an `id`. Put it in `wrangler.local.toml`, replacing
+`REPLACE_WITH_KV_NAMESPACE_ID`:
 
 ```toml
 [[kv_namespaces]]
@@ -109,16 +122,14 @@ binding = "RATE_KV"
 id = "<the id it printed>"
 ```
 
-The committed id belongs to the maintainer's Cloudflare account. If you deploy
-under your own account, replace it with yours. The id is not a secret.
+### 5. Point the worker at the catalog repo
 
-### 4. Point the worker at the catalog repo
-
-In `wrangler.toml`, `[vars]`:
+In `wrangler.local.toml`, `[vars]`. `GITHUB_REPO` has no default: until it is
+set to a real `owner/name`, the worker answers every submission with `503`.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `GITHUB_REPO` | `wrycu/dcs-sms-prefabs` | `owner/name` of the catalog PRs open against |
+| `GITHUB_REPO` | *(required)* | `owner/name` of the catalog PRs open against, e.g. `nielsvaes/dcs-sms-prefabs` |
 | `BASE_BRANCH` | `main` | branch PRs target; also where `index.json` is read for dedup |
 | `LIMIT_PER_IP_HOUR` | `10` | submissions per IP per hour before `429` |
 | `LIMIT_PER_KEY_HOUR` | `5` | submissions per submitter key per hour |
@@ -126,7 +137,7 @@ In `wrangler.toml`, `[vars]`:
 | `LIMIT_GLOBAL_HOUR` | `60` | submissions per hour (all IPs) before PRs open as drafts |
 | `BANNED_KEYS` | empty | comma-separated key fingerprints (`sms:…`) refused with `403` |
 
-### 5. Create the GitHub token
+### 6. Create the GitHub token
 
 The worker opens PRs with a fine-grained personal access token. PRs appear as
 opened by the token's owner.
@@ -141,27 +152,27 @@ opened by the token's owner.
    Metadata: Read-only is added automatically. Nothing else is needed.
 4. Pick an expiry, generate, and copy the token. It is shown once.
 
-### 6. Store the token in the worker
+### 7. Store the token in the worker
 
 ```sh
-npx wrangler secret put GITHUB_TOKEN
+npx wrangler secret put GITHUB_TOKEN -c wrangler.local.toml
 ```
 
 Paste the token at the prompt. It is stored encrypted in Cloudflare and never
 touches the repo. If Wrangler says the worker doesn't exist yet and offers to
 create it, say yes.
 
-### 7. Deploy
+### 8. Deploy
 
 ```sh
-npx wrangler deploy
+npx wrangler deploy -c wrangler.local.toml
 ```
 
 On an account's first Worker, Wrangler asks you to register a `workers.dev`
 subdomain. It then prints the URL, e.g.
 `https://dcs-sms-ingest.<subdomain>.workers.dev`.
 
-### 8. Verify
+### 9. Verify
 
 Health:
 
@@ -171,7 +182,7 @@ curl https://dcs-sms-ingest.<subdomain>.workers.dev/v1/health
 ```
 
 A real submission has to be signed, so plain `curl` can't make one any more.
-Test from the Mission Editor instead (step 9): the first **Submit** creates
+Test from the Mission Editor instead (step 10): the first **Submit** creates
 your key and opens a PR. Check that PR: it adds `prefabs/<slug>.prefab` and
 `prefabs/<slug>.meta.json` (plus `images/<slug>/<n>.<ext>` when images are
 attached), is labelled `community-submission`, shows your key fingerprint, and
@@ -187,10 +198,13 @@ curl -X POST https://dcs-sms-ingest.<subdomain>.workers.dev/v1/submit \
 # 401 {"error":"unsigned submission; update the dcs-sms mod to share prefabs"}
 ```
 
-### 9. Connect the mod
+### 10. Connect the mod
 
 Set the submit URL in
-[`tools/me-mod/lua/dcs_sms_me/community_config.lua`](../me-mod/lua/dcs_sms_me/community_config.lua):
+[`tools/me-mod/lua/dcs_sms_me/community_config.lua`](../me-mod/lua/dcs_sms_me/community_config.lua).
+The committed value is empty, which disables Share, so point it at your worker
+in your install (and only commit it for the worker that serves the catalog
+`RAW_BASE` reads from):
 
 ```lua
 M.SUBMIT_URL = 'https://dcs-sms-ingest.<subdomain>.workers.dev/v1/submit'
@@ -209,14 +223,14 @@ The mod also needs the LuaSec payload in `Saved Games\DCS\dcs-sms\lib\`
 
 ## Operating it
 
-- **Redeploy after code changes:** `npx wrangler deploy`.
-- **Live logs:** `npx wrangler tail` streams every request, including the
+- **Redeploy after code changes:** `npx wrangler deploy -c wrangler.local.toml`.
+- **Live logs:** `npx wrangler tail -c wrangler.local.toml` streams every request, including the
   GitHub error behind a `502`.
 - **Ban a submitter key:** add its fingerprint (from the PR body) to `BANNED_KEYS` and redeploy. Regenerating a key is free, but they lose their history and any author name the old key claimed.
-- **Rotate the token** (or when it expires): create a new one (step 5), run
-  `npx wrangler secret put GITHUB_TOKEN` again. Takes effect immediately, no
+- **Rotate the token** (or when it expires): create a new one (step 6), run
+  `npx wrangler secret put GITHUB_TOKEN -c wrangler.local.toml` again. Takes effect immediately, no
   redeploy.
-- **Change limits:** edit `[vars]` in `wrangler.toml`, then redeploy.
+- **Change limits:** edit `[vars]` in `wrangler.local.toml`, then redeploy.
 
 ## Troubleshooting
 
@@ -225,12 +239,13 @@ The mod also needs the LuaSec payload in `Saved Games\DCS\dcs-sms\lib\`
 | `401 … clock is N minute(s) behind/ahead` | The submitter's PC clock is wrong. Signatures are only accepted within 5 minutes of real time. |
 | `401 unsigned submission` | A client without signing, e.g. a hand-made curl request or an old mod build. |
 | `Wrangler requires at least Node.js v22.0.0` | Old Node — see Prerequisites (nvm). |
-| `502 {"error":"submission could not be forwarded…"}` | A GitHub call failed. `npx wrangler tail` shows which. Usually: token missing (`secret put` not run), expired, lacking Contents/Pull requests write, or scoped to a different repo; or `GITHUB_REPO` is wrong. |
+| `502 {"error":"submission could not be forwarded…"}` | A GitHub call failed. `npx wrangler tail -c wrangler.local.toml` shows which. Usually: token missing (`secret put` not run), expired, lacking Contents/Pull requests write, or scoped to a different repo; or `GITHUB_REPO` is wrong. |
 | `429` during testing | The per-IP limit (10/hour). Wait for the hour to roll over, or raise `LIMIT_PER_IP_HOUR`. |
 | `409` (already in the catalog / awaiting review) | That exact prefab (byte-identical) is in `index.json`, or in an **open** submission PR (the body names it). Close the old PR to resubmit, or change the prefab. |
 | PR has no `validate` check | Actions is disabled on the catalog repo (common on forks) — see Prerequisites. |
 | Large submissions fail with Cloudflare error 1102 | The free plan's 10 ms CPU limit; base64-encoding big images for the GitHub API is the expensive part. Move to Workers Paid, or lower the image caps (worker `CAPS` and `share_submit.lua` `M.CAPS` together). |
-| Mod says "Community uploads are not configured in this build." | `SUBMIT_URL` is empty in the installed `community_config.lua` (step 9). |
+| Mod says "Community uploads are not configured in this build." | `SUBMIT_URL` is empty in the installed `community_config.lua` (step 10). The committed value is empty on purpose. |
+| `503 submissions are not configured on this server` | `GITHUB_REPO` is unset or still `OWNER/…` — you deployed the template instead of `-c wrangler.local.toml`. |
 | Mod stuck on "Uploading…" or Submit does nothing | Look for `sms.me.share` / `GUI Error` lines in `Saved Games\DCS\Logs\dcs.log`. A "loop or previous error loading module" error means a mixed-version install — copy the whole folder and restart DCS. |
 
 ## Test

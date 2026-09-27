@@ -4,12 +4,12 @@ local M = {}
 
 -- raw.githubusercontent.com base for the community repo's default branch.
 -- Trailing slash required; file_url concatenates directly.
--- Catalog source: https://github.com/wrycu/dcs-sms-prefabs
-M.RAW_BASE = 'https://raw.githubusercontent.com/wrycu/dcs-sms-prefabs/main/'
+-- Catalog source: https://github.com/nielsvaes/dcs-sms-prefabs
+M.RAW_BASE = 'https://raw.githubusercontent.com/nielsvaes/dcs-sms-prefabs/main/'
 
 -- Community ingest worker (tools/ingest-worker) endpoint for in-editor
 -- uploads. Empty = uploads disabled; the Share dialog says so.
-M.SUBMIT_URL = 'https://dcs-sms-ingest.raspy-recipe-da83.workers.dev/v1/submit'
+M.SUBMIT_URL = ''
 
 -- Manifest path within the repo.
 M.MANIFEST_PATH = 'index.json'

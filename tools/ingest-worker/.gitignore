@@ -1,2 +1,4 @@
 .wrangler/
+# Your deployment's real values (copy of wrangler.toml, filled in).
+wrangler.local.toml
 node_modules/

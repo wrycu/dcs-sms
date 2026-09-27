@@ -240,7 +240,7 @@ boundary where it already is.
   "images": ["<slug>/1.jpg", "<slug>/schematic.png"],
   "submitted_utc": "2026-09-19T14:02:11Z",
   "submitter_key": "SHA256:9f2a…",
-  "source": "https://github.com/wrycu/dcs-sms-prefabs/pull/123"
+  "source": "https://github.com/nielsvaes/dcs-sms-prefabs/pull/123"
 }
 ```
 

@@ -370,6 +370,15 @@ test('fingerprint matches the Lua format for the RFC 8032 test key', async () =>
   assert.equal(await auth.fingerprint(pub), 'sms:' + Buffer.from(d).toString('hex').slice(0, 16));
 });
 
+test('an unconfigured worker refuses submissions without touching GitHub', async () => {
+  for (const repo of [undefined, '', 'OWNER/dcs-sms-prefabs', 'not a repo']) {
+    const gh = fakeGitHub();
+    const res = await handle(await submissionRequest(), env({ GITHUB_REPO: repo }), { fetch: gh.fetchFn, now: NOW });
+    assert.equal(res.status, 503, String(repo));
+    assert.equal(gh.calls.length, 0);
+  }
+});
+
 test('routing: health, 404, 405', async () => {
   assert.equal((await handle(new Request('https://i/v1/health'), env())).status, 200);
   assert.equal((await handle(new Request('https://i/nope'), env())).status, 404);

@@ -19,6 +19,8 @@ import * as ratelimit from './ratelimit.js';
 import * as auth from './auth.js';
 import * as identity from './identity.js';
 
+class ConfigError extends Error {}
+
 function json(status, body, headers = {}) {
   return new Response(JSON.stringify(body), {
     status,
@@ -33,7 +35,7 @@ async function sha256Hex(bytes) {
 
 function config(env) {
   return {
-    repo: env.GITHUB_REPO || 'wrycu/dcs-sms-prefabs',
+    repo: env.GITHUB_REPO,
     base: env.BASE_BRANCH || 'main',
     perIp: Number(env.LIMIT_PER_IP_HOUR || 10),
     perKeyHour: Number(env.LIMIT_PER_KEY_HOUR || 5),
@@ -102,6 +104,11 @@ export async function submit(request, env, deps = {}) {
   const fetchFn = deps.fetch || fetch;
   const now = deps.now || (() => new Date());
   const cfg = config(env);
+  // No default catalog: a worker deployed from the template must not open PRs
+  // anywhere until it has been pointed at a repo.
+  if (!cfg.repo || !/^[\w.-]+\/[\w.-]+$/.test(cfg.repo) || cfg.repo.startsWith('OWNER/')) {
+    throw new ConfigError('GITHUB_REPO is not configured');
+  }
 
   const sub = await parseSubmission(request);
   const nowSec = Math.floor(now().getTime() / 1000);
@@ -183,6 +190,10 @@ export async function handle(request, env, deps = {}) {
     return await submit(request, env, deps);
   } catch (e) {
     if (e instanceof SubmissionError) return json(e.status, { error: e.message });
+    if (e instanceof ConfigError) {
+      console.error(e.message);
+      return json(503, { error: 'submissions are not configured on this server' });
+    }
     console.error(e && e.stack ? e.stack : e);
     return json(502, { error: 'submission could not be forwarded; try again later' });
   }
