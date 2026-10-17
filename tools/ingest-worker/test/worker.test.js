@@ -21,8 +21,9 @@ function fakeKV() {
 }
 
 // Fake GitHub + raw.githubusercontent. Records every call; `existing` is the
-// set of repo paths that exist on main; `index` is the served manifest.
-function fakeGitHub({ existing = [], index = [], openPrs = [] } = {}) {
+// set of repo paths that exist on main; `index` is the served manifest;
+// `sidecars` maps a repo path to the JSON served for it on main.
+function fakeGitHub({ existing = [], index = [], openPrs = [], sidecars = {} } = {}) {
   const calls = [];
   const blobs = [];
   const fetchFn = async (url, init = {}) => {
@@ -30,7 +31,11 @@ function fakeGitHub({ existing = [], index = [], openPrs = [] } = {}) {
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method, url, body });
     const ok = (obj, status = 200) => new Response(JSON.stringify(obj), { status });
-    if (url.startsWith('https://raw.githubusercontent.com/')) return ok({ schema: 1, prefabs: index });
+    if (url.startsWith('https://raw.githubusercontent.com/')) {
+      const p = url.replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, '');
+      if (p === 'index.json') return ok({ schema: 1, prefabs: index });
+      return p in sidecars ? ok(sidecars[p]) : new Response('404: Not Found', { status: 404 });
+    }
     const path = url.replace(/^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+/, '');
     if (path.startsWith('/contents/')) {
       const p = decodeURI(path.slice('/contents/'.length).split('?')[0]);
@@ -329,10 +334,13 @@ test('per-key hourly limit applies across IPs', async () => {
   assert.equal(res.status, 429);
 });
 
+const fpOf = (key) => auth.fingerprint(Buffer.from(key.pubB64, 'base64'));
+const labelsOf = (gh) => gh.calls.find((c) => c.url.endsWith('/labels')).body.labels;
+const prBodyOf = (gh) => gh.calls.find((c) => c.url.endsWith('/pulls') && c.method === 'POST').body.body;
+
 test('first use registers the key; the PR body counts earlier submissions', async () => {
   const e = env();
   const key = await newKey();
-  const prBodyOf = (gh) => gh.calls.find((c) => c.url.endsWith('/pulls') && c.method === 'POST').body.body;
   let gh = fakeGitHub();
   await handle(await submissionRequest({ prefab: PREFAB + 1, sign: { key } }), e, { fetch: gh.fetchFn, now: NOW });
   assert.match(prBodyOf(gh), /first submission from this key/);
@@ -341,27 +349,80 @@ test('first use registers the key; the PR body counts earlier submissions', asyn
   assert.match(prBodyOf(gh), /1 earlier submission\(s\) from this key/);
 });
 
-test('an author name claimed by another key is flagged, not refused', async () => {
+test('an open PR claims no author name', async () => {
   const e = env();
   const alice = await newKey();
   const mallory = await newKey();
-  const labelsOf = (gh) => gh.calls.find((c) => c.url.endsWith('/labels')).body.labels;
+  // Mallory squats "Shuffle" first; nothing is merged yet.
   let gh = fakeGitHub();
-  await handle(await submissionRequest({ prefab: PREFAB + 'a', sign: { key: alice } }), e, { fetch: gh.fetchFn, now: NOW });
+  await handle(await submissionRequest({ prefab: PREFAB + 'm', sign: { key: mallory } }), e, { fetch: gh.fetchFn, now: NOW });
   assert.deepEqual(labelsOf(gh), ['community-submission']);
-
   gh = fakeGitHub();
+  const res = await handle(await submissionRequest({ prefab: PREFAB + 'a', sign: { key: alice } }), e,
+    { fetch: gh.fetchFn, now: NOW });
+  assert.equal(res.status, 202);
+  assert.deepEqual(labelsOf(gh), ['community-submission'], 'the real author is not flagged by an unmerged squat');
+  assert.equal([...e.RATE_KV.store.keys()].filter((k) => k.startsWith('handle:')).length, 0, 'no name claims in KV');
+});
+
+test('a name owned by a merged entry from another key is flagged, not refused', async () => {
+  const e = env();
+  const alice = await newKey();
+  const mallory = await newKey();
+  const merged = {
+    index: [{ name: 'Old FOB', author: 'Shuffle', path: 'prefabs/old-fob.prefab' }],
+    sidecars: { 'prefabs/old-fob.meta.json': { author: 'Shuffle', submitter_key: await fpOf(alice),
+      submitted_utc: '2026-09-20T10:00:00Z' } },
+  };
+  let gh = fakeGitHub(merged);
   const meta = { ...META, author: '  shuffle ' };   // same handle, normalised
   const res = await handle(await submissionRequest({ meta, prefab: PREFAB + 'm', sign: { key: mallory } }), e,
     { fetch: gh.fetchFn, now: NOW });
   assert.equal(res.status, 202);
   assert.deepEqual(labelsOf(gh), ['community-submission', 'needs-review: handle-conflict']);
-  const body = gh.calls.find((c) => c.url.endsWith('/pulls') && c.method === 'POST').body.body;
-  assert.match(body, /Author name conflict/);
+  assert.match(prBodyOf(gh), /Author name conflict/);
+  assert.ok(prBodyOf(gh).includes(await fpOf(alice)));
 
-  gh = fakeGitHub();
+  gh = fakeGitHub(merged);
   await handle(await submissionRequest({ prefab: PREFAB + 'a2', sign: { key: alice } }), e, { fetch: gh.fetchFn, now: NOW });
-  assert.deepEqual(labelsOf(gh), ['community-submission'], 'the original key is not flagged');
+  assert.deepEqual(labelsOf(gh), ['community-submission'], 'the owning key is not flagged');
+});
+
+test('the earliest merged keyed entry owns the name; keyless entries own nothing', async () => {
+  const e = env();
+  const alice = await newKey();
+  const mallory = await newKey();
+  const gh = fakeGitHub({
+    index: [
+      { name: 'Legacy', author: 'Shuffle', path: 'prefabs/legacy.prefab' },           // predates keys
+      { name: 'Later', author: 'Shuffle', path: 'prefabs/later.prefab' },
+      // A key surfaced in index.json itself is used without reading the sidecar.
+      { name: 'First', author: 'Shuffle', path: 'prefabs/first.prefab',
+        submitter_key: await fpOf(alice), submitted_utc: '2026-09-01T00:00:00Z' },
+      { name: 'Other', author: 'Someone Else', path: 'prefabs/other.prefab' },
+    ],
+    sidecars: {
+      'prefabs/legacy.meta.json': { author: 'Shuffle' },
+      'prefabs/later.meta.json': { author: 'Shuffle', submitter_key: await fpOf(mallory),
+        submitted_utc: '2026-09-10T00:00:00Z' },
+    },
+  });
+  await handle(await submissionRequest({ prefab: PREFAB + 'm2', sign: { key: mallory } }), e, { fetch: gh.fetchFn, now: NOW });
+  assert.deepEqual(labelsOf(gh), ['community-submission', 'needs-review: handle-conflict']);
+  const reads = gh.calls.filter((c) => c.url.endsWith('.meta.json')).map((c) => c.url.split('/').pop());
+  assert.deepEqual(reads.sort(), ['later.meta.json', 'legacy.meta.json'], 'only same-name, keyless index entries are read');
+
+  const gh2 = fakeGitHub({ index: [{ name: 'Legacy', author: 'Shuffle', path: 'prefabs/legacy.prefab' }],
+    sidecars: { 'prefabs/legacy.meta.json': { author: 'Shuffle' } } });
+  await handle(await submissionRequest({ prefab: PREFAB + 'm3', sign: { key: mallory } }), e, { fetch: gh2.fetchFn, now: NOW });
+  assert.deepEqual(labelsOf(gh2), ['community-submission'], 'a name with only keyless entries is unowned');
+});
+
+test('a missing or unreadable sidecar never blocks a submission', async () => {
+  const gh = fakeGitHub({ index: [{ name: 'Gone', author: 'Shuffle', path: 'prefabs/gone.prefab' }] });
+  const res = await handle(await submissionRequest({ prefab: PREFAB + 'g' }), env(), { fetch: gh.fetchFn, now: NOW });
+  assert.equal(res.status, 202);
+  assert.deepEqual(labelsOf(gh), ['community-submission']);
 });
 
 test('fingerprint matches the Lua format for the RFC 8032 test key', async () => {

@@ -118,9 +118,11 @@ Two capabilities follow, and they are the point of the layer:
 - **Entry ownership.** The merged entry records the submitter's fingerprint.
   Only that keyholder can publish an update to it — cryptographically, with no
   moderation judgment. This is what gives the catalog a notion of "v2" at all.
-- **Handle binding, first-come.** The first submission claiming
-  `author: "Shuffle"` binds that handle to that pubkey. A later submission
-  claiming it from a different key is flagged `needs-review: handle-conflict`.
+- **Handle binding, first merged.** The earliest *merged* entry with
+  `author: "Shuffle"` binds that handle to its `submitter_key`. A later
+  submission claiming it from a different key is flagged
+  `needs-review: handle-conflict`. Opening a PR binds nothing — otherwise junk
+  PRs could squat names and get the real author flagged.
   Self-declared author becomes unverified exactly once, then enforced — which
   covers the impersonation case without an IdP.
 
@@ -206,8 +208,9 @@ bad signature/keyid.
 1. **Verify** — keyid known and not revoked; `|now - timestamp| ≤ 300s`; nonce
    unseen (KV, 600s TTL); signature matches; caps respected.
 1b. **Identity** — register an unseen pubkey on first accepted submission
-   (TOFU). Bind the claimed `author` handle to it if unclaimed; flag
-   `needs-review: handle-conflict` if the handle belongs to another key. Reject
+   (TOFU). Flag `needs-review: handle-conflict` if the claimed `author`
+   handle belongs to another key — the key behind its earliest merged catalog
+   entry, read from `index.json` / the merged sidecars, never from open PRs. Reject
    outright if the pubkey is on the ban list.
 2. **Rate limit** — per pubkey (5/hour, 20/day), per IP (10/hour), and a
    **global circuit breaker**: above N submissions/hour, new PRs open as drafts
@@ -425,7 +428,8 @@ A working end-to-end slice with **Layer 2 (Ed25519 identity) but not Layer 1
   Data API, per-IP / per-key hourly + per-key daily limits, global draft
   breaker, `BANNED_KEYS` → 403. Signature verification with native WebCrypto
   Ed25519, ±300 s timestamp window, single-use nonces (KV, 600 s). TOFU key
-  registry and first-come handle binding in KV; a conflicting handle is
+  registry in KV; handle ownership derived from merged sidecars' `submitter_key`
+  (earliest merged entry wins, open PRs claim nothing); a conflicting handle is
   labelled `needs-review: handle-conflict`, not refused. Sidecar carries
   `submitter_key`.
 - **ME-mod** — `sha512.lua` + `ed25519.lua` (pure arithmetic: the ME is **PUC

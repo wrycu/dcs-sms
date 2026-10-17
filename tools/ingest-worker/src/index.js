@@ -9,9 +9,11 @@
 //
 // Every submission is signed with the submitter's per-install Ed25519 key
 // (auth.js). The key is trusted on first use (identity.js): it proves "same
-// submitter as before", never who they are. The shared-key HMAC layer from the
-// spec is not implemented. Other protections: size caps, per-IP and per-key
-// limits, the global draft breaker, and the manual merge.
+// submitter as before", never who they are. An author name belongs to the key
+// behind its earliest merged catalog entry, so unmerged PRs claim nothing. The
+// shared-key HMAC layer from the spec is not implemented. Other protections:
+// size caps, per-IP and per-key limits, the global draft breaker, and the
+// manual merge.
 
 import { parseSubmission, buildSidecar, slugify, SubmissionError } from './submission.js';
 import { makeClient } from './github.js';
@@ -45,17 +47,21 @@ function config(env) {
   };
 }
 
+// A file on the base branch, parsed as JSON, or null.
+async function readBaseJson(fetchFn, cfg, path) {
+  try {
+    const res = await fetchFn(`https://raw.githubusercontent.com/${cfg.repo}/${cfg.base}/${path}`);
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
 // Manifest entries on the base branch, or [] if the index can't be read (a
 // missed dedup only costs a reviewer a duplicate PR; it must not block uploads).
 async function loadIndex(fetchFn, cfg) {
-  try {
-    const res = await fetchFn(`https://raw.githubusercontent.com/${cfg.repo}/${cfg.base}/index.json`);
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data.prefabs) ? data.prefabs : [];
-  } catch {
-    return [];
-  }
+  const data = await readBaseJson(fetchFn, cfg, 'index.json');
+  return data && Array.isArray(data.prefabs) ? data.prefabs : [];
 }
 
 // First free stem: <slug>, <slug>-2, <slug>-3 ... checked against both the
@@ -91,8 +97,9 @@ function prBody(meta, sha, draft, who) {
     `- Client: ${meta.client || '(unknown)'}`,
   ];
   if (who.handleConflict) {
-    lines.push('', `> **Author name conflict:** "${meta.author}" was first used by a different key ` +
-      `(\`${who.handleOwner}\`). Check this isn't someone else's name before merging.`);
+    lines.push('', `> **Author name conflict:** merged catalog entries by "${meta.author}" were ` +
+      `submitted with a different key (\`${who.handleOwner}\`). Check this isn't someone else's ` +
+      'name before merging.');
   }
   if (draft) lines.push('', '> Opened as a draft: the hourly submission breaker tripped.');
   lines.push('', '_Submitted from the Mission Editor via the dcs-sms ingest worker. ' +
@@ -147,12 +154,14 @@ export async function submit(request, env, deps = {}) {
   const imagePaths = sub.images.map((img, i) => `${slug}/${i + 1}.${img.ext}`);
   const stamp = now().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const sidecar = buildSidecar(sub.meta, imagePaths, stamp, signer.fingerprint);
-  const known = await identity.lookup(env.RATE_KV, signer.fingerprint, sub.meta.author);
+  const known = await identity.lookup(env.RATE_KV, signer.fingerprint);
+  const handleOwner = await identity.handleOwner(index, sub.meta.author,
+    (path) => readBaseJson(fetchFn, cfg, path));
   const who = {
     fingerprint: signer.fingerprint,
     priorSubmissions: known.priorSubmissions,
-    handleOwner: known.handleOwner,
-    handleConflict: known.handleOwner !== null && known.handleOwner !== signer.fingerprint,
+    handleOwner,
+    handleConflict: handleOwner !== null && handleOwner !== signer.fingerprint,
   };
 
   const files = [
@@ -174,8 +183,9 @@ export async function submit(request, env, deps = {}) {
       ? ['community-submission', 'needs-review: handle-conflict']
       : ['community-submission'],
   });
-  // Only an accepted submission registers the key / claims the name.
-  await identity.record(env.RATE_KV, signer.fingerprint, sub.meta.author, stamp);
+  // Only an accepted submission registers the key. The author name is not
+  // claimed here; merging the PR is what makes it count (identity.handleOwner).
+  await identity.record(env.RATE_KV, signer.fingerprint, stamp);
   return json(202, { submission_id: submissionId, pr_url: pr.url, submitter_key: signer.fingerprint });
 }
 
