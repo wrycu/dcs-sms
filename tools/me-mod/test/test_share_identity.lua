@@ -14,9 +14,11 @@ local b64      = require('dcs_sms_me.base64')
 local failures = 0
 local function check(n, ok, msg) if ok then print('PASS '..n) else print('FAIL '..n..': '..tostring(msg)); failures=failures+1 end end
 
+-- Build the temp prefix from %TEMP% (os.tmpname is unsafe on Windows Lua 5.1;
+-- it returns drive-root paths like '\s9j8.' that a normal user can't write).
 local function tmp_root()
-    local p = os.tmpname(); os.remove(p)
-    return p .. '_'
+    return (os.getenv('TEMP') or os.getenv('TMP') or '.') .. package.config:sub(1, 1)
+        .. 'sms_share_identity_test_' .. tostring(os.time()) .. '_'
 end
 
 -- ---- create / load round trip ----

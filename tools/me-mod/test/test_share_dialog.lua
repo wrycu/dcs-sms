@@ -47,9 +47,9 @@ local missing = dialog.recent_screenshots('X:\\nope\\', { dir = function() error
 check('missing folder yields empty list, no throw', type(missing) == 'table' and #missing == 0)
 
 -- ---- author persistence ----
-local root = os.tmpname()
-os.remove(root)
-root = root .. '_'
+-- Temp prefix under %TEMP% (os.tmpname is unsafe on Windows Lua 5.1).
+local root = (os.getenv('TEMP') or os.getenv('TMP') or '.') .. package.config:sub(1, 1)
+    .. 'sms_share_dialog_test_' .. tostring(os.time()) .. '_'
 check('no saved author -> empty', dialog.load_author(root) == '')
 check('save_author writes', dialog.save_author(root, '  Shuffle  ') == true)
 check('load_author trims', dialog.load_author(root) == 'Shuffle', dialog.load_author(root))
