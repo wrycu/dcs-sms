@@ -19,6 +19,7 @@
 --   M.fingerprint(pub)                -> 'sms:' .. 16 hex chars
 --   M.load(root)                      -> id | nil, err      (id = {seed, pub})
 --   M.create(root, tick)              -> id | nil, err      (generates + saves)
+--   M.new_seed(extra, tick)           -> 32-byte seed
 --   M.load_or_create(root, tick)      -> id | nil, err
 --   M.message(pub_b64, ts, nonce, meta_json) -> the exact bytes that get signed
 --   M.sign_headers(id, meta_json, now, tick) -> { ['X-SMS-…'] = … }
@@ -52,8 +53,9 @@ local function now_us()
 end
 
 -- Gather a pool of hard-to-predict values. `extra` lets tests (and callers)
--- mix in more.
-function M.entropy_pool(extra)
+-- mix in more. `tick` (optional) is called during the ~64 ms jitter loop so a
+-- coroutine can spread it across frames.
+function M.entropy_pool(extra, tick)
     local parts = { tostring(extra or ''), now_us(), tostring(os.time()),
                     string.format('%.9f', os.clock()), tostring({}), tostring(function() end),
                     string.format('%.3f', collectgarbage('count')) }
@@ -67,18 +69,19 @@ function M.entropy_pool(extra)
     end)
     -- Timing jitter: how far a busy loop gets between clock readings varies
     -- with scheduling, caches and frequency scaling.
-    for _ = 1, 64 do
+    for i = 1, 64 do
         local start, n = os.clock(), 0
         while os.clock() == start and n < 100000 do n = n + 1 end
         parts[#parts + 1] = tostring(n) .. now_us() .. tostring({})
+        if tick and i % 8 == 0 then tick() end
     end
     math.randomseed(os.time())
     parts[#parts + 1] = tostring(math.random()) .. tostring(math.random())
     return table.concat(parts, '|')
 end
 
-function M.new_seed(extra)
-    return sha512.digest(M.entropy_pool(extra)):sub(1, 32)
+function M.new_seed(extra, tick)
+    return sha512.digest(M.entropy_pool(extra, tick), tick):sub(1, 32)
 end
 
 -- ---- storage ---------------------------------------------------------------
@@ -108,9 +111,10 @@ function M.load(root)
 end
 
 -- Generate a keypair, check it signs, and save it. `tick` (optional) is passed
--- to the Ed25519 work so a coroutine can spread it across frames.
+-- to the entropy gathering, hashing and Ed25519 work so a coroutine can spread
+-- it across frames.
 function M.create(root, tick, extra_entropy)
-    local seed = M.new_seed(extra_entropy)
+    local seed = M.new_seed(extra_entropy, tick)
     local pub = ed.public_key(seed, tick)
     local id = { seed = seed, pub = pub }
     local json = '{\n'

@@ -4,9 +4,11 @@
 -- word is a (hi, lo) pair of 32-bit values held in doubles, and XOR/AND work a
 -- byte at a time through 256x256 lookup tables built on first use. Slow next
 -- to native code, but ed25519.lua only hashes a few hundred bytes per
--- signature, so it doesn't matter.
+-- signature, so it doesn't matter. Larger inputs (share_identity's entropy
+-- pool) pass a `tick` callback, invoked every few blocks and during the
+-- first-use table build, so a coroutine can yield between frames.
 --
---   M.digest(msg) -> 64-byte binary string
+--   M.digest(msg, tick) -> 64-byte binary string
 --   M.hex(msg)    -> 128-char lowercase hex
 
 local M = {}
@@ -16,8 +18,10 @@ local P32 = 4294967296
 
 -- 8-bit XOR / AND tables, index a * 256 + b. Built lazily (65536 entries each).
 local X8, A8
-local function build_tables()
-    X8, A8 = {}, {}
+-- Filled into locals and published at the end, so a caller that yields via
+-- `tick` mid-build never leaves half-built tables for someone else.
+local function build_tables(tick)
+    local x8, a8 = {}, {}
     local x4, a4 = {}, {}
     for a = 0, 15 do
         for b = 0, 15 do
@@ -35,10 +39,12 @@ local function build_tables()
         local ah, al = floor(a / 16), a % 16
         for b = 0, 255 do
             local bh, bl = floor(b / 16), b % 16
-            X8[a * 256 + b] = x4[ah * 16 + bh] * 16 + x4[al * 16 + bl]
-            A8[a * 256 + b] = a4[ah * 16 + bh] * 16 + a4[al * 16 + bl]
+            x8[a * 256 + b] = x4[ah * 16 + bh] * 16 + x4[al * 16 + bl]
+            a8[a * 256 + b] = a4[ah * 16 + bh] * 16 + a4[al * 16 + bl]
         end
+        if tick and a % 32 == 31 then tick() end
     end
+    X8, A8 = x8, a8
 end
 
 -- 32-bit bitwise ops on non-negative integers < 2^32.
@@ -196,8 +202,8 @@ local function block(h, s, off)
     end
 end
 
-function M.digest(msg)
-    if not X8 then build_tables() end
+function M.digest(msg, tick)
+    if not X8 then build_tables(tick) end
     msg = tostring(msg)
     local len = #msg
     -- Pad: 0x80, zeros, then the bit length as a 128-bit big-endian integer.
@@ -207,7 +213,10 @@ function M.digest(msg)
         .. string.rep('\0', 8) .. put32(floor(bits / P32)) .. put32(bits % P32)
     local h = {}
     for i = 1, 16 do h[i] = IV[i] end
-    for off = 1, #s, 128 do block(h, s, off) end
+    for off = 1, #s, 128 do
+        block(h, s, off)
+        if tick and off % 256 == 129 then tick() end
+    end
     local out = {}
     for i = 1, 16 do out[i] = put32(h[i]) end
     return table.concat(out)

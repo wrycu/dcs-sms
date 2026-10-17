@@ -10,6 +10,7 @@ end
 local identity = require('dcs_sms_me.share_identity')
 local ed       = require('dcs_sms_me.ed25519')
 local b64      = require('dcs_sms_me.base64')
+local sha512   = require('dcs_sms_me.sha512')
 
 local failures = 0
 local function check(n, ok, msg) if ok then print('PASS '..n) else print('FAIL '..n..': '..tostring(msg)); failures=failures+1 end end
@@ -48,6 +49,21 @@ os.remove(root .. identity.FILE)
 
 -- ---- fresh seeds differ ----
 check('two generated seeds differ', identity.new_seed() ~= identity.new_seed())
+
+-- ---- seed generation yields instead of one long frame ----
+local seed_ticks = 0
+local seed = identity.new_seed(nil, function() seed_ticks = seed_ticks + 1 end)
+check('new_seed ticks through the jitter loop and hashing', seed_ticks >= 8, seed_ticks)
+check('ticked seed is 32 bytes', #seed == 32)
+local big = string.rep('entropy pool ', 300)
+local hticks = 0
+check('sha512 with tick matches without', sha512.digest(big, function() hticks = hticks + 1 end) == sha512.digest(big))
+check('sha512 ticks on multi-block input', hticks > 0, hticks)
+local co = coroutine.create(function() return identity.new_seed(nil, coroutine.yield) end)
+local resumes, ok, out = 0
+repeat ok, out = coroutine.resume(co); resumes = resumes + 1 until coroutine.status(co) == 'dead'
+check('new_seed runs inside a coroutine with yield as tick', ok and type(out) == 'string' and #out == 32, out)
+check('new_seed spans several resumes', resumes > 8, resumes)
 
 -- ---- fingerprint ----
 local fp = identity.fingerprint(id.pub)
